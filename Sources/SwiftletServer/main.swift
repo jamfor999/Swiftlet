@@ -10,8 +10,27 @@ import SwiftletCore
 //
 //   swiftlet-server --model <dir> [--port 8080] [--cache-gb 2]
 
+/// Message content per the OpenAI Chat Completions spec: a plain string, an
+/// array of parts ([{type:"text",text:"..."}]), or null on tool-call turns.
+/// Text parts are joined; non-text parts are dropped; null decodes as "".
+struct ChatContent: Decodable {
+    struct Part: Decodable { let text: String? }
+    let text: String
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if try c.decodeNil() {
+            text = ""
+        } else if let s = try? c.decode(String.self) {
+            text = s
+        } else {
+            text = try c.decode([Part].self).compactMap(\.text).joined()
+        }
+    }
+}
+
+/// OpenAI-compatible Chat Completions request body.
 struct ChatRequest: Decodable {
-    struct Message: Decodable { let role: String; let content: String }
+    struct Message: Decodable { let role: String; let content: ChatContent }
     let messages: [Message]
     let stream: Bool?
     let max_tokens: Int?
@@ -119,7 +138,7 @@ final class HTTPHandler: ChannelInboundHandler {
             respondJSON(context, status: .badRequest, data: jsonData(["error": "malformed request"]))
             return
         }
-        let messages = request.messages.map { ["role": $0.role, "content": $0.content] }
+        let messages = request.messages.map { ["role": $0.role, "content": $0.content.text] }
         let maxNew = request.max_tokens ?? request.max_completion_tokens ?? 512
         let streaming = request.stream ?? false
         let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
