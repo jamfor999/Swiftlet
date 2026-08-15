@@ -129,9 +129,12 @@ public struct SafetensorsFile {
             var e: UInt32 = 0
             var n = frac
             while n & 0x0400 == 0 { n <<= 1; e += 1 }
-            return Float(bitPattern: sign | (113 - e) << 23 | (n & 0x03FF) << 13)
+            // e <= 9 by construction (frac < 0x0400), so the bias is always
+            // positive; the parens matter — `<<` binds tighter than `-`.
+            return Float(bitPattern: sign | UInt32(113 - Int(e)) << 23 | (n & 0x03FF) << 13)
         }
-        return Float(bitPattern: sign | (exp - 15 + 127) << 23 | frac << 13)
+        // exp is in [1, 30] here: +112 == -15 + 127 without unsigned wrap.
+        return Float(bitPattern: sign | (exp + 112) << 23 | frac << 13)
     }
 
     /// Tensor contents converted to Float32. Supports F32, F16, BF16.
