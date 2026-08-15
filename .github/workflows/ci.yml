@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Build and test (arm64)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+      - run: swift test
+
+  intel-build:
+    name: Build x86_64
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      # Cross-compile check: keeps the Intel CPU tier (Float16-free code,
+      # CCPUKernels x86 guards) from regressing. The AVX2 kernel itself runs
+      # wherever tests execute on Intel hardware.
+      - run: swift build --arch x86_64

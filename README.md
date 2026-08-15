@@ -87,8 +87,10 @@ swift build -c release
 The same command also repacks raw MLX checkpoints
 (`--from-hf mlx-community/...` or `--source /path/to/checkpoint`).
 
-Requirements: Apple Silicon, macOS 14+ or iOS 17+, free SSD space for the
-container (18 GB for the 35B, 34 GB for the 8-bit 35B, 42 GB for the 80B).
+Requirements: Apple Silicon for the fast Metal path, macOS 14+ or iOS 17+,
+free SSD space for the container (18 GB for the 35B, 34 GB for the 8-bit 35B,
+42 GB for the 80B). Intel Macs work on the CPU engine (and, on macOS 26, on
+AMD GPUs) — see [Intel Macs](#intel-macs) for measured numbers.
 
 ## Try it on your phone
 
@@ -123,6 +125,32 @@ routes every token to 10 of 512 experts (80B) or 8 of 256 (35B). Swiftlet:
 75 percent of the layers use Gated DeltaNet linear attention with a
 fixed-size recurrent state, so there is no growing KV cache for those layers
 at any context length.
+
+## Intel Macs
+
+Everything except the Metal kernels is architecture-neutral, and the CPU
+engine serves containers too: the same `.qpack` download, the same `chat`,
+`generate`, and server commands, with routed experts streamed through a
+bounded cache and computed by a packed AVX2 GEMV (scalar fallback elsewhere).
+
+On an iMac 2020 (27", 10-core i9, 40 GB RAM, SSD, Radeon Pro 5300), 35B
+4-bit, measured:
+
+| Engine | Decode | Notes |
+|---|---|---|
+| Metal (AMD GPU, macOS 26) | 1.5 tok/s | `.storageModeShared` works on AMD on macOS 26; the expert cache lives in system RAM and the GPU reads it over PCIe, which is the bottleneck |
+| CPU (AVX2 GEMV) | 0.9 tok/s | `--device cpu`; the dense core runs as f32 through Accelerate, the glue (attention, DeltaNet recurrence) is scalar Swift |
+
+Both are 5-7x slower than Apple Silicon, where unified memory and the SSD
+bus match the streaming design. Intel Macs are supported for correctness and
+experimentation, not comfort: time-to-first-token on a short prompt is ~15 s
+(prefill runs at decode speed — already first on the roadmap), and long
+outputs need patience. With 40 GB of RAM the expert cache can hold the whole
+pool (`--cache-gb 16`), making the SSD irrelevant after warm-up.
+
+Device selection: `--device auto` (default: Metal if it initializes, CPU
+otherwise), `--device gpu`, or `--device cpu`, on `swiftlet chat`,
+`swiftlet generate`, and `swiftlet-server`.
 
 ## Four ways to use it
 

@@ -1,8 +1,13 @@
 #include "include/qgemv.h"
 
-#include <immintrin.h>
-#include <stdlib.h>
 #include <string.h>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#define SWIFTLET_X86 1
+#include <immintrin.h>
+#else
+#define SWIFTLET_X86 0
+#endif
 
 /* ---------- shared helpers ---------- */
 
@@ -100,7 +105,9 @@ static void qgemv_scalar(const unsigned char *w, const unsigned char *scales,
     }
 }
 
-/* ---------- AVX2 ---------- */
+/* ---------- AVX2 (x86 only; other arches use the scalar path) ---------- */
+
+#if SWIFTLET_X86
 
 /* Horizontal sum of the 8 lanes. */
 __attribute__((target("avx2")))
@@ -174,6 +181,7 @@ static void qgemv_avx2(const unsigned char *w, const unsigned char *scales,
         y[row] = acc;
     }
 }
+#endif /* SWIFTLET_X86 */
 
 /* ---------- dispatcher ---------- */
 
@@ -187,6 +195,7 @@ void swiftlet_qgemv(const unsigned char *w, const unsigned char *scales,
 
     /* The vector path handles the shapes MLX actually produces (group sizes
      * are powers of two >= 32, so multiples of 8). */
+#if SWIFTLET_X86
     if (bits == 4 || bits == 8) {
         static int cached = -1;
         if (cached < 0) cached = __builtin_cpu_supports("avx2") ? 1 : 0;
@@ -196,6 +205,7 @@ void swiftlet_qgemv(const unsigned char *w, const unsigned char *scales,
             return;
         }
     }
+#endif
     qgemv_scalar(w, scales, biases, x, y, out_dim, in_dim, group_size,
                  bits, scales_type, row_begin, row_end);
 }
