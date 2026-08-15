@@ -114,6 +114,26 @@ public struct SafetensorsFile {
         try out.write(to: url)
     }
 
+    /// IEEE 754 half -> float bit conversion. `Swift.Float16` is unavailable
+    /// on Intel macOS, so decode by hand (load-time only, not a hot path).
+    static func f16ToF32(_ h: UInt16) -> Float {
+        let sign = UInt32(h & 0x8000) << 16
+        let exp = UInt32(h & 0x7C00) >> 10
+        let frac = UInt32(h & 0x03FF)
+        if exp == 0x1F {   // Inf / NaN
+            return Float(bitPattern: sign | 0x7F80_0000 | frac << 13 | (frac != 0 ? 0x0040_0000 : 0))
+        }
+        if exp == 0 {
+            if frac == 0 { return Float(bitPattern: sign) }   // ±0
+            // Subnormal: normalize so bit 10 is set, then rebias the exponent.
+            var e: UInt32 = 0
+            var n = frac
+            while n & 0x0400 == 0 { n <<= 1; e += 1 }
+            return Float(bitPattern: sign | (113 - e) << 23 | (n & 0x03FF) << 13)
+        }
+        return Float(bitPattern: sign | (exp - 15 + 127) << 23 | frac << 13)
+    }
+
     /// Tensor contents converted to Float32. Supports F32, F16, BF16.
     public func floats(_ name: String) throws -> [Float] {
         let t = try info(name)
@@ -122,7 +142,7 @@ public struct SafetensorsFile {
         case "F32":
             return bytes.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         case "F16":
-            return bytes.withUnsafeBytes { $0.bindMemory(to: Float16.self).map(Float.init) }
+            return bytes.withUnsafeBytes { $0.bindMemory(to: UInt16.self).map(Self.f16ToF32) }
         case "BF16":
             return bytes.withUnsafeBytes {
                 $0.bindMemory(to: UInt16.self).map { Float(bitPattern: UInt32($0) << 16) }

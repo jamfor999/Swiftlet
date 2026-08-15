@@ -233,7 +233,7 @@ extension SafetensorsFile {
         case "F32":
             return bytes.withUnsafeBytes { Array($0.bindMemory(to: Float.self)[elementRange]) }
         case "F16":
-            return bytes.withUnsafeBytes { $0.bindMemory(to: Float16.self)[elementRange].map(Float.init) }
+            return bytes.withUnsafeBytes { $0.bindMemory(to: UInt16.self)[elementRange].map(SafetensorsFile.f16ToF32) }
         case "BF16":
             return bytes.withUnsafeBytes {
                 $0.bindMemory(to: UInt16.self)[elementRange].map { Float(bitPattern: UInt32($0) << 16) }
