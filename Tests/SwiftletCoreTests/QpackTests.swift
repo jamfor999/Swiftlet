@@ -121,9 +121,9 @@ import Testing
     }
 
     /// The CPU engine must serve containers: logits from the container (blob
-    /// experts via CPUExpertCache) match the plain checkpoint (safetensors
-    /// experts) bit for bit, and the bounded cache evicts under pressure
-    /// without changing results.
+    /// experts via the packed GEMV) match the plain checkpoint (f32 dequant
+    /// reference) within the same tolerance the Metal engine is held to, and
+    /// the bounded cache evicts under pressure without changing results.
     @Test func cpuModelServesContainer() throws {
         let src = Self.fixturesDir.appendingPathComponent("tiny-model-q4")
         let out = FileManager.default.temporaryDirectory
@@ -151,9 +151,9 @@ import Testing
         #expect(a.count == b.count)
         var maxDiff: Float = 0
         for i in 0..<min(a.count, b.count) { maxDiff = max(maxDiff, abs(a[i] - b[i])) }
-        #expect(maxDiff == 0, "container logits diff \(maxDiff)")
+        #expect(maxDiff < 2e-3, "container logits diff \(maxDiff)")
         let cache = container.expertCache!
-        #expect(cache.misses > 0 && cache.hits + cache.misses > cache.residentCount,
+        #expect(cache.misses > 0 && cache.hits + cache.misses > cache.allocatedSlots,
                 "cache did not exercise eviction")
     }
 }

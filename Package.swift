@@ -18,9 +18,14 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
     ],
     targets: [
+        // Quantized-GEMV C kernels (AVX2 with runtime dispatch, portable
+        // scalar fallback) used by the CPU engine. No unsafeFlags: AVX2 is
+        // selected per-function via __attribute__((target)).
+        .target(name: "CCPUKernels"),
         .target(
             name: "SwiftletCore",
             dependencies: [
+                "CCPUKernels",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             resources: [.copy("Kernels.metal.txt")]

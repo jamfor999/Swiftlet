@@ -167,8 +167,8 @@ func runGenerate(modelDir: String, prompt: String, maxNew: Int, chat: Bool, rawI
     if let cpu = model as? QwenCPUModel, let cache = cpu.expertCache {
         let total = cache.hits + cache.misses
         FileHandle.standardError.write(Data(String(
-            format: "expert cache: %d experts resident (%.1f GB), %d hits / %d misses (%.0f%% hit rate)\n",
-            cache.residentCount, Double(cache.residentBytes) / 1_073_741_824,
+            format: "expert cache: %d/%d blobs resident (%.1f GB), %d hits / %d misses (%.0f%% hit rate)\n",
+            cache.allocatedSlots, cache.slotCount, Double(cache.residentBytes) / 1_073_741_824,
             cache.hits, cache.misses, total > 0 ? 100 * Double(cache.hits) / Double(total) : 0
         ).utf8))
     }

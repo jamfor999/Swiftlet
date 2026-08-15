@@ -538,17 +538,26 @@ public final class QwenCPUModel {
             picksPerRow.append(picks)
         }
 
-        // Batch union: dequantize each selected expert exactly once for the
-        // whole batch (same pattern the streaming runtime uses for prefill).
-        // Containers source their experts from packed blobs through the
-        // bounded cache; plain checkpoints slice them from safetensors.
+        // Batch union: load each selected expert exactly once for the whole
+        // batch (same pattern the streaming runtime uses for prefill).
+        // Containers keep experts as raw quantized blobs in the bounded cache
+        // and compute straight out of them via the packed GEMV; plain
+        // checkpoints dequantize row slices from safetensors as before.
+        var blobPtrs: [Int: UnsafeRawPointer] = [:]
+        if let cache = expertCache {
+            var uniq: [Int] = []
+            var seen = Set<Int>()
+            for picks in picksPerRow {
+                for (e, _) in picks where seen.insert(e).inserted { uniq.append(e) }
+            }
+            for (e, b) in zip(uniq, try cache.blobs(layer: layerIndex, experts: uniq)) {
+                blobPtrs[e] = b
+            }
+        }
         var expertWeights: [Int: (g: [Float], u: [Float], d: [Float])] = [:]
-        for picks in picksPerRow {
-            for (e, _) in picks where expertWeights[e] == nil {
-                if let cache = expertCache {
-                    let ew = try cache.weights(layer: layerIndex, expert: e)
-                    expertWeights[e] = (g: ew.gate, u: ew.up, d: ew.down)
-                } else {
+        if expertCache == nil {
+            for picks in picksPerRow {
+                for (e, _) in picks where expertWeights[e] == nil {
                     expertWeights[e] = (
                         g: try ckpt.moduleWeightSlice(w.expertPrefix + "gate_proj", rowRange: e * inter..<(e + 1) * inter),
                         u: try ckpt.moduleWeightSlice(w.expertPrefix + "up_proj", rowRange: e * inter..<(e + 1) * inter),
@@ -572,6 +581,21 @@ public final class QwenCPUModel {
 
             for (e, p) in picks {
                 let weight = cfg.normTopkProb ? p / scoreSum : p
+                if let cache = expertCache, let blob = blobPtrs[e] {
+                    // Packed path: compute directly out of the cached blob.
+                    QuantizedGEMV.gemv(blob: blob, sections: cache.gate, scalesDtype: cache.scalesDtype,
+                                       x: x, xOffset: s * D, into: &gBuf,
+                                       outDim: inter, inDim: D, groupSize: cache.groupSize, bits: cache.bits)
+                    QuantizedGEMV.gemv(blob: blob, sections: cache.up, scalesDtype: cache.scalesDtype,
+                                       x: x, xOffset: s * D, into: &uBuf,
+                                       outDim: inter, inDim: D, groupSize: cache.groupSize, bits: cache.bits)
+                    for i in 0..<inter { gBuf[i] = Self.silu(gBuf[i]) * uBuf[i] }
+                    QuantizedGEMV.gemv(blob: blob, sections: cache.down, scalesDtype: cache.scalesDtype,
+                                       x: gBuf, xOffset: 0, into: &dBuf,
+                                       outDim: D, inDim: inter, groupSize: cache.groupSize, bits: cache.bits)
+                    for i in 0..<D { out[s * D + i] += weight * dBuf[i] }
+                    continue
+                }
                 let ew = expertWeights[e]!
                 Self.matvec(ew.g, 0, outDim: inter, inDim: D, x, s * D, into: &gBuf, 0)
                 Self.matvec(ew.u, 0, outDim: inter, inDim: D, x, s * D, into: &uBuf, 0)
