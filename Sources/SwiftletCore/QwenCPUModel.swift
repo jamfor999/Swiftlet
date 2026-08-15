@@ -118,12 +118,29 @@ public final class QwenCPUModel {
     /// param but avoids re-dequantizing per decode step. ~10 GB for the 80B.
     public var retainAllLayers = false
 
-    public init(modelDir: URL) throws {
+    /// Bounded cache of dequantized routed experts when `modelDir` is a
+    /// .qpack container (nil for plain checkpoints, where experts dequantize
+    /// straight from safetensors on demand).
+    public private(set) var expertCache: CPUExpertCache?
+
+    public init(modelDir: URL, cacheBudgetGB: Double = 8) throws {
         config = try QwenConfig(url: modelDir.appendingPathComponent("config.json"))
         ckpt = try Checkpoint(dir: modelDir)
         embed = try ckpt.moduleWeight("model.embed_tokens")
         finalNorm = try ckpt.tensor("model.norm.weight")
         lmHead = config.tieWordEmbeddings ? embed : try ckpt.moduleWeight("lm_head")
+        let manifest = modelDir.appendingPathComponent("manifest.json")
+        let layout = modelDir.appendingPathComponent("packed_experts/layout.json")
+        if FileManager.default.fileExists(atPath: manifest.path),
+           FileManager.default.fileExists(atPath: layout.path) {
+            guard let spec = ckpt.defaultQuant else {
+                throw Checkpoint.Error.badShape("container has no quantization config")
+            }
+            expertCache = try CPUExpertCache(
+                containerDir: modelDir, spec: spec,
+                inter: config.moeIntermediateSize, hidden: config.hiddenSize,
+                budgetBytes: Int(cacheBudgetGB * 1_073_741_824))
+        }
     }
 
     func layerWeights(_ i: Int) throws -> LayerWeights {
@@ -275,7 +292,7 @@ public final class QwenCPUModel {
 
         var x2 = h
         Self.rmsNorm(&x2, rows: S, dim: D, weight: layer.postAttnNorm, eps: Float(cfg.rmsNormEps))
-        let m = try moeForward(x2, S: S, w: layer.moe)
+        let m = try moeForward(x2, S: S, layerIndex: layerIndex, w: layer.moe)
         for i in 0..<h.count { h[i] += m[i] }
         return h
     }
@@ -497,7 +514,7 @@ public final class QwenCPUModel {
 
     // MARK: - Mixture of experts
 
-    func moeForward(_ x: [Float], S: Int, w: MoEWeights) throws -> [Float] {
+    func moeForward(_ x: [Float], S: Int, layerIndex: Int, w: MoEWeights) throws -> [Float] {
         let cfg = config
         let D = cfg.hiddenSize, E = cfg.numExperts, inter = cfg.moeIntermediateSize
         let sharedInter = cfg.sharedExpertIntermediateSize
@@ -523,14 +540,21 @@ public final class QwenCPUModel {
 
         // Batch union: dequantize each selected expert exactly once for the
         // whole batch (same pattern the streaming runtime uses for prefill).
+        // Containers source their experts from packed blobs through the
+        // bounded cache; plain checkpoints slice them from safetensors.
         var expertWeights: [Int: (g: [Float], u: [Float], d: [Float])] = [:]
         for picks in picksPerRow {
             for (e, _) in picks where expertWeights[e] == nil {
-                expertWeights[e] = (
-                    g: try ckpt.moduleWeightSlice(w.expertPrefix + "gate_proj", rowRange: e * inter..<(e + 1) * inter),
-                    u: try ckpt.moduleWeightSlice(w.expertPrefix + "up_proj", rowRange: e * inter..<(e + 1) * inter),
-                    d: try ckpt.moduleWeightSlice(w.expertPrefix + "down_proj", rowRange: e * D..<(e + 1) * D)
-                )
+                if let cache = expertCache {
+                    let ew = try cache.weights(layer: layerIndex, expert: e)
+                    expertWeights[e] = (g: ew.gate, u: ew.up, d: ew.down)
+                } else {
+                    expertWeights[e] = (
+                        g: try ckpt.moduleWeightSlice(w.expertPrefix + "gate_proj", rowRange: e * inter..<(e + 1) * inter),
+                        u: try ckpt.moduleWeightSlice(w.expertPrefix + "up_proj", rowRange: e * inter..<(e + 1) * inter),
+                        d: try ckpt.moduleWeightSlice(w.expertPrefix + "down_proj", rowRange: e * D..<(e + 1) * D)
+                    )
+                }
             }
         }
 

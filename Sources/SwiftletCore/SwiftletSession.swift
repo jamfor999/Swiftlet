@@ -1,6 +1,14 @@
 import Foundation
 import Tokenizers
 
+/// Engine choice for a session: automatic (Metal, CPU fallback), force GPU
+/// (errors if Metal is unavailable), or force CPU.
+public enum ComputeDevice: String, Sendable {
+    case auto
+    case gpu
+    case cpu
+}
+
 /// High-level chat session for app integration: owns the model, tokenizer,
 /// chat templating, and metrics, and streams text deltas. This is the API an
 /// app embeds (Priv AI's engines expose the same AsyncStream shape).
@@ -71,21 +79,35 @@ public final class SwiftletSession: @unchecked Sendable {
         return _lastMetrics
     }
 
-    /// Loads tokenizer + model. Prefers the Metal streaming engine; falls back
-    /// to the CPU reference if Metal is unavailable. `cacheBudgetGB` bounds the
-    /// expert cache (keep small on iOS; jetsam is unforgiving).
-    public init(modelDir: URL, retainAllLayers: Bool = false, cacheBudgetGB: Double = 2) async throws {
+    /// Loads tokenizer + model. `device == .auto` (the default) prefers the
+    /// Metal streaming engine and falls back to the CPU engine if Metal is
+    /// unavailable; `.gpu` throws instead of falling back; `.cpu` skips Metal
+    /// entirely. `cacheBudgetGB` bounds the expert cache on either engine
+    /// (keep small on iOS; jetsam is unforgiving).
+    public init(modelDir: URL, retainAllLayers: Bool = false, cacheBudgetGB: Double = 2,
+                device: ComputeDevice = .auto) async throws {
         self.modelDir = modelDir
         print("[SwiftletSession] loading tokenizer...")
         tokenizer = try await AutoTokenizer.from(modelFolder: modelDir)
-        print("[SwiftletSession] tokenizer ok; building Metal model...")
-        if let gpu = try? QwenMetalModel(modelDir: modelDir, cacheBudgetGB: cacheBudgetGB) {
+        let gpu: QwenMetalModel?
+        switch device {
+        case .cpu:
+            print("[SwiftletSession] CPU engine requested")
+            gpu = nil
+        case .gpu:
+            print("[SwiftletSession] tokenizer ok; building Metal model...")
+            gpu = try QwenMetalModel(modelDir: modelDir, cacheBudgetGB: cacheBudgetGB)
+        case .auto:
+            print("[SwiftletSession] tokenizer ok; building Metal model...")
+            gpu = try? QwenMetalModel(modelDir: modelDir, cacheBudgetGB: cacheBudgetGB)
+        }
+        if let gpu {
             model = gpu
             usesGPU = true
             print("[SwiftletSession] Metal model ready")
         } else {
-            print("[SwiftletSession] Metal init FAILED, falling back to CPU (heavy)")
-            let cpu = try QwenCPUModel(modelDir: modelDir)
+            print("[SwiftletSession] using CPU engine")
+            let cpu = try QwenCPUModel(modelDir: modelDir, cacheBudgetGB: cacheBudgetGB)
             cpu.retainAllLayers = retainAllLayers
             model = cpu
             usesGPU = false

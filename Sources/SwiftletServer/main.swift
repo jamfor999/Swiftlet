@@ -45,19 +45,19 @@ func flag(_ name: String) -> String? {
     return cliArgs[i + 1]
 }
 guard let modelPath = flag("--model") else {
-    print("usage: swiftlet-server --model <dir> [--port 8080] [--cache-gb 2]")
+    print("usage: swiftlet-server --model <dir> [--port 8080] [--cache-gb 2] [--device auto|gpu|cpu]")
     exit(2)
 }
 let port = Int(flag("--port") ?? "8080") ?? 8080
 let cacheGB = Double(flag("--cache-gb") ?? "2") ?? 2
+let device = SwiftletCore.ComputeDevice(rawValue: flag("--device") ?? "auto") ?? .auto
 let modelURL = URL(fileURLWithPath: modelPath)
 
 FileHandle.standardError.write(Data("loading model + tokenizer...\n".utf8))
-// The same Metal streaming engine as `swiftlet chat`: routed experts stream
-// from the .qpack blobs, so a 35B/80B container serves in a few GB of RAM.
-// (The CPU model reader cannot serve containers: their experts are not in
-// model.safetensors.)
-let session = try await SwiftletSession(modelDir: modelURL, cacheBudgetGB: cacheGB)
+// The same engine stack as `swiftlet chat`: the Metal streaming engine when
+// available, otherwise the CPU engine — both stream routed experts from the
+// .qpack blobs, so a 35B/80B container serves in a few GB of RAM.
+let session = try await SwiftletSession(modelDir: modelURL, cacheBudgetGB: cacheGB, device: device)
 let modelName: String = {
     let configURL = modelURL.appendingPathComponent("config.json")
     if let cfg = try? JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any],

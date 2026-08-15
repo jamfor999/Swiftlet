@@ -74,17 +74,34 @@ func runGenerate(modelDir: String, prompt: String, maxNew: Int, chat: Bool, rawI
     FileHandle.standardError.write(Data("loading tokenizer + model...\n".utf8))
     let tokenizer: Tokenizer? = rawIds == nil ? try await AutoTokenizer.from(modelFolder: url) : nil
     let model: any InferenceModel
-    if CommandLine.arguments.contains("--gpu") {
+    // Device selection: --device cpu|gpu|auto, with --gpu as the legacy
+    // spelling of --device gpu. Default stays the CPU engine for generate
+    // (it doubles as the reference runtime).
+    let device = ComputeDevice(
+        rawValue: flagValue(CommandLine.arguments, "--device")
+            ?? (CommandLine.arguments.contains("--gpu") ? ComputeDevice.gpu.rawValue : ComputeDevice.cpu.rawValue)
+    ) ?? .cpu
+    let cacheGB = Double(flagValue(CommandLine.arguments, "--cache-gb") ?? "8") ?? 8
+    // --lazy: ~3 GB peak instead of ~10-14 GB, at the cost of re-dequantizing
+    // dense weights per step. Kind to machines that are doing other work.
+    func cpuEngine() throws -> QwenCPUModel {
+        let cpu = try QwenCPUModel(modelDir: url, cacheBudgetGB: cacheGB)
+        cpu.retainAllLayers = !CommandLine.arguments.contains("--lazy")
+        return cpu
+    }
+    switch device {
+    case .gpu:
         // Metal runtime: weights stay quantized; experts stream via the
         // bounded cache (--cache-gb) when the model is a .qpack container.
-        let cacheGB = Double(flagValue(CommandLine.arguments, "--cache-gb") ?? "8") ?? 8
         model = try QwenMetalModel(modelDir: url, cacheBudgetGB: cacheGB)
-    } else {
-        let cpu = try QwenCPUModel(modelDir: url)
-        // --lazy: ~3 GB peak instead of ~10-14 GB, at the cost of re-dequantizing
-        // dense weights per step. Kind to machines that are doing other work.
-        cpu.retainAllLayers = !CommandLine.arguments.contains("--lazy")
-        model = cpu
+    case .cpu:
+        model = try cpuEngine()
+    case .auto:
+        if let gpu = try? QwenMetalModel(modelDir: url, cacheBudgetGB: cacheGB) {
+            model = gpu
+        } else {
+            model = try cpuEngine()
+        }
     }
 
     var ids: [Int]
@@ -147,13 +164,21 @@ func runGenerate(modelDir: String, prompt: String, maxNew: Int, chat: Bool, rawI
             cache.hits, cache.misses, total > 0 ? 100 * Double(cache.hits) / Double(total) : 0
         ).utf8))
     }
+    if let cpu = model as? QwenCPUModel, let cache = cpu.expertCache {
+        let total = cache.hits + cache.misses
+        FileHandle.standardError.write(Data(String(
+            format: "expert cache: %d experts resident (%.1f GB), %d hits / %d misses (%.0f%% hit rate)\n",
+            cache.residentCount, Double(cache.residentBytes) / 1_073_741_824,
+            cache.hits, cache.misses, total > 0 ? 100 * Double(cache.hits) / Double(total) : 0
+        ).utf8))
+    }
 }
 
 /// Multi-turn chat through SwiftletSession — the exact code path the app
 /// uses (template + no-think prompt, conversation cache, sampling).
-func runChat(modelDir: String, turns: [String], maxNew: Int, cacheGB: Double, greedy: Bool, system: String?) async throws {
+func runChat(modelDir: String, turns: [String], maxNew: Int, cacheGB: Double, greedy: Bool, system: String?, device: ComputeDevice) async throws {
     let session = try await SwiftletSession(
-        modelDir: URL(fileURLWithPath: modelDir), cacheBudgetGB: cacheGB)
+        modelDir: URL(fileURLWithPath: modelDir), cacheBudgetGB: cacheGB, device: device)
     var messages: [[String: String]] = []
     if let system { messages.append(["role": "system", "content": system]) }
     let options = greedy ? SwiftletSession.GenerationOptions.greedy
@@ -211,7 +236,7 @@ case "chat" where args.count >= 3:
         var skip = false
         for a in args.dropFirst(3) {
             if skip { skip = false; continue }
-            if a == "--max-new" || a == "--cache-gb" || a == "--system" { skip = true; continue }
+            if a == "--max-new" || a == "--cache-gb" || a == "--system" || a == "--device" { skip = true; continue }
             if a.hasPrefix("--") { continue }
             turns.append(a)
         }
@@ -221,7 +246,8 @@ case "chat" where args.count >= 3:
             maxNew: Int(flagValue(args, "--max-new") ?? "256") ?? 256,
             cacheGB: Double(flagValue(args, "--cache-gb") ?? "8") ?? 8,
             greedy: args.contains("--greedy"),
-            system: flagValue(args, "--system")
+            system: flagValue(args, "--system"),
+            device: ComputeDevice(rawValue: flagValue(args, "--device") ?? "auto") ?? .auto
         )
     } catch {
         print("chat failed: \(error)")

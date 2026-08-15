@@ -119,4 +119,41 @@ import Testing
         for i in 0..<a.count { maxDiff = max(maxDiff, abs(a[i] - b[i])) }
         #expect(maxDiff < 2e-3, "streamed container logits diff \(maxDiff)")
     }
+
+    /// The CPU engine must serve containers: logits from the container (blob
+    /// experts via CPUExpertCache) match the plain checkpoint (safetensors
+    /// experts) bit for bit, and the bounded cache evicts under pressure
+    /// without changing results.
+    @Test func cpuModelServesContainer() throws {
+        let src = Self.fixturesDir.appendingPathComponent("tiny-model-q4")
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiny-cpu-\(UUID().uuidString).qpack")
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        var repacker = QpackRepacker(checkpointDir: src, outputDir: out)
+        repacker.log = { _ in }
+        try repacker.repack()
+
+        let plain = try QwenCPUModel(modelDir: src)
+        plain.retainAllLayers = true
+        // Tiny budget forces eviction between steps.
+        let container = try QwenCPUModel(modelDir: out, cacheBudgetGB: 0.001)
+        container.retainAllLayers = true
+
+        let s1 = QwenCPUModel.DecodeState()
+        let s2 = QwenCPUModel.DecodeState()
+        var a: [Float] = []
+        var b: [Float] = []
+        for t in [1, 5, 9, 2, 7] {
+            a = try plain.step([t], state: s1)
+            b = try container.step([t], state: s2)
+        }
+        #expect(a.count == b.count)
+        var maxDiff: Float = 0
+        for i in 0..<min(a.count, b.count) { maxDiff = max(maxDiff, abs(a[i] - b[i])) }
+        #expect(maxDiff == 0, "container logits diff \(maxDiff)")
+        let cache = container.expertCache!
+        #expect(cache.misses > 0 && cache.hits + cache.misses > cache.residentCount,
+                "cache did not exercise eviction")
+    }
 }
